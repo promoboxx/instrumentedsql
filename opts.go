@@ -16,3 +16,19 @@ func WithTracer(t Tracer) Opt {
 		w.Tracer = t
 	}
 }
+
+// DisableArgsLabel will prevent the spans from submitting
+// any of the argument data with the spans in case it is sensitive data
+func DisableArgsLabel(t Tracer) Opt {
+	return func(w *wrappedDriver) {
+		w.withArgsLabel = false
+	}
+}
+
+// WithShortQueryNames changes the query labels on the spans to be shortened versions
+// i.e `find_user($1, $2, $3, $4, $5)` --> `find_user`
+func WithShortQueryNames(t Tracer) Opt {
+	return func(w *wrappedDriver) {
+		w.shortQueryName = true
+	}
+}
