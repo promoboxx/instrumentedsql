@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"strings"
 
 	"github.com/kr/pretty"
 	"github.com/pkg/errors"
@@ -12,13 +13,17 @@ import (
 type wrappedDriver struct {
 	Logger
 	Tracer
-	parent driver.Driver
+	parent         driver.Driver
+	withArgsLabel  bool
+	shortQueryName bool
 }
 
 type wrappedConn struct {
 	Logger
 	Tracer
-	parent driver.Conn
+	parent         driver.Conn
+	withArgsLabel  bool
+	shortQueryName bool
 }
 
 type wrappedTx struct {
@@ -31,9 +36,11 @@ type wrappedTx struct {
 type wrappedStmt struct {
 	Logger
 	Tracer
-	ctx    context.Context
-	query  string
-	parent driver.Stmt
+	ctx            context.Context
+	query          string
+	parent         driver.Stmt
+	withArgsLabel  bool
+	shortQueryName bool
 }
 
 type wrappedResult struct {
@@ -57,7 +64,7 @@ type wrappedRows struct {
 // Any call without a context passed will not be instrumented. Please be sure to use the ___Context() and BeginTx() function calls added in Go 1.8
 // instead of the older calls which do not accept a context.
 func WrapDriver(driver driver.Driver, opts ...Opt) driver.Driver {
-	d := wrappedDriver{parent: driver}
+	d := wrappedDriver{parent: driver, shortQueryName: false, withArgsLabel: true}
 
 	for _, opt := range opts {
 		opt(&d)
@@ -79,7 +86,8 @@ func (d wrappedDriver) Open(name string) (driver.Conn, error) {
 		return nil, err
 	}
 
-	return wrappedConn{Tracer: d.Tracer, Logger: d.Logger, parent: conn}, nil
+	// inherit some of the config for labels
+	return wrappedConn{Tracer: d.Tracer, Logger: d.Logger, parent: conn, shortQueryName: d.shortQueryName, withArgsLabel: d.withArgsLabel}, nil
 }
 
 func (c wrappedConn) Prepare(query string) (driver.Stmt, error) {
@@ -88,7 +96,8 @@ func (c wrappedConn) Prepare(query string) (driver.Stmt, error) {
 		return nil, err
 	}
 
-	return wrappedStmt{Tracer: c.Tracer, Logger: c.Logger, query: query, parent: parent}, nil
+	// inherit some of the config for labels
+	return wrappedStmt{Tracer: c.Tracer, Logger: c.Logger, query: query, parent: parent, shortQueryName: c.shortQueryName, withArgsLabel: c.withArgsLabel}, nil
 }
 
 func (c wrappedConn) Close() error {
@@ -167,8 +176,8 @@ func (c wrappedConn) Exec(query string, args []driver.Value) (driver.Result, err
 func (c wrappedConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (r driver.Result, err error) {
 	span := c.GetSpan(ctx).NewChild("sql-conn-exec")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", c.getQueryLabelValue(query))
+	span.SetLabel("args", pretty.Sprint(c.getNamedArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -233,8 +242,8 @@ func (c wrappedConn) Query(query string, args []driver.Value) (driver.Rows, erro
 func (c wrappedConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (rows driver.Rows, err error) {
 	span := c.GetSpan(ctx).NewChild("sql-conn-query")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", c.getQueryLabelValue(query))
+	span.SetLabel("args", pretty.Sprint(c.getNamedArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -307,8 +316,8 @@ func (s wrappedStmt) NumInput() int {
 func (s wrappedStmt) Exec(args []driver.Value) (res driver.Result, err error) {
 	span := s.GetSpan(s.ctx).NewChild("sql-stmt-exec")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", s.query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", s.getQueryLabelValue())
+	span.SetLabel("args", pretty.Sprint(s.getArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -326,8 +335,8 @@ func (s wrappedStmt) Exec(args []driver.Value) (res driver.Result, err error) {
 func (s wrappedStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 	span := s.GetSpan(s.ctx).NewChild("sql-stmt-query")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", s.query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", s.getQueryLabelValue())
+	span.SetLabel("args", pretty.Sprint(s.getArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -345,8 +354,8 @@ func (s wrappedStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 func (s wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res driver.Result, err error) {
 	span := s.GetSpan(ctx).NewChild("sql-stmt-exec")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", s.query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", s.getQueryLabelValue())
+	span.SetLabel("args", pretty.Sprint(s.getNamedArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -380,8 +389,8 @@ func (s wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue) 
 func (s wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue) (rows driver.Rows, err error) {
 	span := s.GetSpan(ctx).NewChild("sql-stmt-query")
 	span.SetLabel("component", "database/sql")
-	span.SetLabel("query", s.query)
-	span.SetLabel("args", pretty.Sprint(args))
+	span.SetLabel("query", s.getQueryLabelValue())
+	span.SetLabel("args", pretty.Sprint(s.getNamedArgsLabelValue(args)))
 	defer func() {
 		span.SetLabel("err", fmt.Sprint(err))
 		span.Finish()
@@ -465,4 +474,63 @@ func namedValueToValue(named []driver.NamedValue) ([]driver.Value, error) {
 		dargs[n] = param.Value
 	}
 	return dargs, nil
+}
+
+// get getQueryName returns the base name of the query stripped of any
+// string replacement characters
+func getShortQueryName(query string) string {
+	// split it at the first open parentheses then
+	// take the first item in the splits to return
+	// the base query name
+	splits := strings.Split(query, "(")
+
+	return splits[0]
+}
+
+func (c *wrappedConn) getQueryLabelValue(query string) string {
+	if c.shortQueryName {
+		return getShortQueryName(query)
+	}
+
+	return query
+}
+
+func (s *wrappedStmt) getQueryLabelValue() string {
+	if s.shortQueryName {
+		return getShortQueryName(s.query)
+	}
+
+	return s.query
+}
+
+func (c *wrappedConn) getNamedArgsLabelValue(args []driver.NamedValue) []driver.NamedValue {
+	if c.withArgsLabel {
+		return args
+	}
+
+	return nil
+}
+
+func (c *wrappedConn) getArgsLabelValue(args []driver.Value) []driver.Value {
+	if c.withArgsLabel {
+		return args
+	}
+
+	return nil
+}
+
+func (s *wrappedStmt) getArgsLabelValue(args []driver.Value) []driver.Value {
+	if s.withArgsLabel {
+		return args
+	}
+
+	return nil
+}
+
+func (s *wrappedStmt) getNamedArgsLabelValue(args []driver.NamedValue) []driver.NamedValue {
+	if s.withArgsLabel {
+		return args
+	}
+
+	return nil
 }
