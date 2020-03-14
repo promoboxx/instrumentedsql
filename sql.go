@@ -64,7 +64,7 @@ type wrappedRows struct {
 // Any call without a context passed will not be instrumented. Please be sure to use the ___Context() and BeginTx() function calls added in Go 1.8
 // instead of the older calls which do not accept a context.
 func WrapDriver(driver driver.Driver, opts ...Opt) driver.Driver {
-	d := wrappedDriver{parent: driver, shortQueryName: false, withArgsLabel: true}
+	d := wrappedDriver{parent: driver, shortQueryName: false, withArgsLabel: false}
 
 	for _, opt := range opts {
 		opt(&d)
